@@ -15,6 +15,7 @@
  */
 package io.netty.util.internal;
 
+import io.netty.util.CharsetUtil;
 import io.netty.util.internal.logging.InternalLogger;
 import io.netty.util.internal.logging.InternalLoggerFactory;
 import org.jctools.queues.MpscArrayQueue;
@@ -28,19 +29,27 @@ import org.jctools.queues.atomic.SpscLinkedAtomicQueue;
 import org.jctools.util.Pow2;
 import org.jctools.util.UnsafeAccess;
 
+import java.io.BufferedReader;
 import java.io.File;
+import java.io.FileInputStream;
+import java.io.IOException;
+import java.io.InputStreamReader;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.security.AccessController;
 import java.security.PrivilegedAction;
+import java.util.Collections;
 import java.util.Deque;
+import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Queue;
 import java.util.Random;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedDeque;
 import java.util.concurrent.ConcurrentMap;
@@ -96,6 +105,10 @@ public final class PlatformDependent {
     private static final int BIT_MODE = bitMode0();
     private static final String NORMALIZED_ARCH = normalizeArch(SystemPropertyUtil.get("os.arch", ""));
     private static final String NORMALIZED_OS = normalizeOs(SystemPropertyUtil.get("os.name", ""));
+
+    // keep in sync with maven builds!
+    private static final String[] ALLOWED_LINUX_OS_CLASSIFIERS = {"fedora", "suse", "arch"};
+    private static final Set<String> LINUX_OS_CLASSIFIERS = new LinkedHashSet<String>();
 
     private static final int ADDRESS_SIZE = addressSize0();
     private static final boolean USE_DIRECT_BUFFER_NO_CLEANER;
@@ -195,6 +208,48 @@ public final class PlatformDependent {
                     "Your platform does not provide complete low-level API for accessing direct buffers reliably. " +
                     "Unless explicitly requested, heap buffer will always be preferred to avoid potential system " +
                     "instability.");
+        }
+
+        // For specifications, see https://www.freedesktop.org/software/systemd/man/os-release.html
+        final String[] OS_RELEASE_FILES = {"/etc/os-release", "/usr/lib/os-release"};
+        final String LINUX_ID_PREFIX = "ID=";
+        final String LINUX_ID_LIKE_PREFIX = "ID_LIKE=";
+        final HashSet<String> allowedClassifiers = new HashSet<String>();
+        Collections.addAll(allowedClassifiers, ALLOWED_LINUX_OS_CLASSIFIERS);
+
+        for (String osReleaseFileName : OS_RELEASE_FILES) {
+            final File file = new File(osReleaseFileName);
+            if (file.exists()) {
+                BufferedReader reader = null;
+                try {
+                    reader = new BufferedReader(
+                            new InputStreamReader(
+                                    new FileInputStream(file), CharsetUtil.UTF_8));
+
+                    String line;
+                    while ((line = reader.readLine()) != null) {
+                        if (line.startsWith(LINUX_ID_PREFIX)) {
+                            String id = normalizeOsReleaseVariableValue(line.substring(LINUX_ID_PREFIX.length()));
+                            addClassifier(allowedClassifiers, id);
+                        } else if (line.startsWith(LINUX_ID_LIKE_PREFIX)) {
+                            line = normalizeOsReleaseVariableValue(line.substring(LINUX_ID_LIKE_PREFIX.length()));
+                            addClassifier(allowedClassifiers, line.split("[ ]+"));
+                        }
+                    }
+                } catch (IOException ignored) {
+                    // Ignore
+                } finally {
+                    if (reader != null) {
+                        try {
+                            reader.close();
+                        } catch (IOException ignored) {
+                            // Ignore
+                        }
+                    }
+                }
+                // specification states we should only fall back if /etc/os-release does not exist
+                break;
+            }
         }
     }
 
@@ -1272,6 +1327,23 @@ public final class PlatformDependent {
 
     public static String normalizedOs() {
         return NORMALIZED_OS;
+    }
+
+    public static Set<String> normalizedLinuxClassifiers() {
+        return Collections.unmodifiableSet(LINUX_OS_CLASSIFIERS);
+    }
+
+    private static void addClassifier(HashSet<String> allowedClassifiers, String... split) {
+        for (String id : split) {
+            if (allowedClassifiers.contains(id)) {
+                LINUX_OS_CLASSIFIERS.add(id);
+            }
+        }
+    }
+
+    private static String normalizeOsReleaseVariableValue(String value) {
+        // Variable assignment values may be enclosed in double or single quotes.
+        return value.trim().replaceAll("[\"']", "");
     }
 
     private static String normalize(String value) {
